@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Title</title>
+    <!-- element-plus style -->
+    <link rel="stylesheet" href="https://unpkg.com/element-plus/dist/index.css"/>
+    <!-- Vue 3 -->
+    <script src="https://unpkg.com/vue@3"></script>
+    <!-- element-plus -->
+    <script src="https://unpkg.com/element-plus"></script>
+    <!-- md5.js -->
+    <script src="https://cdn.jsdelivr.net/gh/emn178/js-md5/build/md5.min.js"></script>
+    <!-- axios -->
+    <script src="https://unpkg.com/axios/dist/axios.min.js"></script>
+</head>
+<body>
+<div id="app">
+    <el-upload
+            v-model:file-list="fileList"
+            drag
+            :auto-upload="false"
+            @change="handleFileChange"
+    >
+        <div class="el-upload__text">
+            点击或拖拽上传
+        </div>
+    </el-upload>
+    <div style="text-align: center;margin-bottom: 20px">
+        <el-button type="primary" @click="uploadFile">上传</el-button>
+    </div>
+
+    <div>
+        <el-progress
+                :text-inside="true"
+                :stroke-width="20"
+                :percentage="successfulChunkPercents "
+                status="success"
+        />
+    </div>
+</div>
+<script>
+    const App = {
+        data() {
+            return {
+                currentFile: null, // 当前选中的文件
+                chunkSize: 32 * 1024 * 1024, // 分片大小
+                chunkCount: 0, // 分片数量
+                chunksUploaded: 0, // 已上传的分片数量
+                fileMd5: '', // 文件的md5值
+                fileSuffix: '', // 文件后缀
+                successfulChunkPercents: 0, // 上传成功的分片百分比
+                chunkList: [], // 分片列表
+            };
+        },
+
+        methods: {
+            // 选择文件时触发
+            handleFileChange(file) {
+                const reader = new FileReader()
+                reader.readAsArrayBuffer(file.raw);
+                reader.onload = (event) => {
+                    const fileContent = event.target.result
+                    this.fileMd5 = md5(fileContent).toString()
+                };
+                reader.onerror = (error) => {
+                    console.error('读取文件时发生错误:', error);
+                };
+                this.currentFile = file.raw;
+                this.chunkCount = Math.ceil(file.size / this.chunkSize);
+                this.chunksUploaded = 0;
+                this.fileSuffix = "." + file.raw.name.split('.').pop()
+                this.successfulChunkPercents = 0
+                for (let i = 0; i < this.chunkCount; i++) {
+                    const start = i * this.chunkSize;
+                    const end = Math.min(start + this.chunkSize - 1, this.currentFile.size - 1);
+                    this.chunkList[i] = this.currentFile.slice(start, end)
+                }
+            },
+            // 点击上传按钮时触发
+            async uploadFile() {
+                const res = await axios.get(`http://localhost:8080/minio/checkExits?md5=${this.fileMd5}&fileSuffix=${this.fileSuffix}`)
+                if (res.data) {
+                    this.successfulChunkPercents = 100
+                    alert('文件上传成功')
+                    return
+                }
+                console.log("开始上传", this.chunkList)
+                const chunkPromises = [];
+                for (let i = 0; i < this.chunkList.length; i++) {
+                    console.log("上传第", i + 1, "个分片")
+                    chunkPromises.push(this.uploadChunk(this.chunkList[i], i + 1, () => {
+                        this.successfulChunkPercents += 99 / this.chunkCount
+                        this.chunksUploaded++
+                    }))
+                }
+                // 等待所有分片上传完成
+                await Promise.all(chunkPromises);
+                if (this.chunksUploaded === this.chunkCount) {
+                    const mergeResult = await axios.post(`http://localhost:8080/minio/merge?md5=${this.fileMd5}&fileSuffix=${this.fileSuffix}&chunkTotal=${this.chunkCount}`)
+                    if (mergeResult.data.startsWith("[miss_chunk]")) {
+                        alert('文件缺失，请重新上传')
+                        return
+                    }
+                    this.successfulChunkPercents = 100
+                    alert(mergeResult.data)
+                }
+            },
+
+            // 上传分片
+            uploadChunk(chunk, chunkIndex, onSuccess) {
+                let retryTime = 5;
+                const formData = new FormData()
+                formData.append('md5', this.fileMd5)
+                formData.append('chunkIndex', chunkIndex);
+                formData.append('chunk', chunk);
+                return axios.post('http://localhost:8080/minio/upload', formData, {headers: {'Content-Type': 'multipart/form-data'}})
+                    .then(res => onSuccess())
+                    .catch(error => {
+                        if (retryTime > 0) {
+                            retryTime--;
+                            return this.uploadChunk(chunk, chunkIndex, onSuccess);
+                        }
+                    });
+            },
+        },
+    };
+    const app = Vue.createApp(App);
+    app.use(ElementPlus);
+    app.mount("#app");
+</script>
+</body>
+</html>
